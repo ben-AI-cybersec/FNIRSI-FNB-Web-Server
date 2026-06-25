@@ -26,10 +26,10 @@ class AlertManager:
 
     def __init__(self):
         self.thresholds = {
-            'max_voltage': 21.0,      # Maximum voltage (V)
-            'min_voltage': 3.0,       # Minimum voltage (V)
+            'max_voltage': 28.0,      # Maximum voltage (V) — FNAC28 rated max
+            'min_voltage': 0.0,       # Minimum voltage (V)
             'max_current': 6.0,       # Maximum current (A)
-            'max_power': 120.0,       # Maximum power (W)
+            'max_power': 168.0,       # Maximum power (W) — 28 V × 6 A
             'max_temperature': 80.0,  # Maximum temperature (°C)
             'voltage_drop_threshold': 0.5,  # Voltage drop detection (V)
         }

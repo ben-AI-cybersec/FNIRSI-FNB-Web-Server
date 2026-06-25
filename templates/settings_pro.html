@@ -62,12 +62,12 @@
             <div style="display: flex; flex-direction: column; gap: 0.5rem;">
                 <div class="setting-item-pro">
                     <label class="setting-label-pro">MAX VOLTAGE (V)</label>
-                    <input type="number" id="threshold-max-voltage" value="21.0" step="0.1" class="setting-input-pro">
+                    <input type="number" id="threshold-max-voltage" value="28.0" step="0.1" class="setting-input-pro">
                 </div>
 
                 <div class="setting-item-pro">
                     <label class="setting-label-pro">MIN VOLTAGE (V)</label>
-                    <input type="number" id="threshold-min-voltage" value="3.0" step="0.1" class="setting-input-pro">
+                    <input type="number" id="threshold-min-voltage" value="0.0" step="0.1" class="setting-input-pro">
                 </div>
 
                 <div class="setting-item-pro">
@@ -77,7 +77,7 @@
 
                 <div class="setting-item-pro">
                     <label class="setting-label-pro">MAX POWER (W)</label>
-                    <input type="number" id="threshold-max-power" value="120.0" step="1" class="setting-input-pro">
+                    <input type="number" id="threshold-max-power" value="168.0" step="1" class="setting-input-pro">
                 </div>
 
                 <div class="setting-item-pro">
@@ -200,10 +200,10 @@ async function loadThresholds() {
 
         if (result.success) {
             const thresholds = result.thresholds;
-            document.getElementById('threshold-max-voltage').value = thresholds.max_voltage || 21.0;
-            document.getElementById('threshold-min-voltage').value = thresholds.min_voltage || 3.0;
+            document.getElementById('threshold-max-voltage').value = thresholds.max_voltage || 28.0;
+            document.getElementById('threshold-min-voltage').value = thresholds.min_voltage || 0.0;
             document.getElementById('threshold-max-current').value = thresholds.max_current || 6.0;
-            document.getElementById('threshold-max-power').value = thresholds.max_power || 120.0;
+            document.getElementById('threshold-max-power').value = thresholds.max_power || 168.0;
             document.getElementById('threshold-max-temp').value = thresholds.max_temperature || 80.0;
         }
     } catch (error) {
@@ -347,12 +347,22 @@ function loadSystemInfo() {
     }
 }
 
-// Toast notification
+// Toast notification — show a temporary banner since dashboard_pro.js isn't loaded here
 function showToast(message, type = 'info') {
-    console.log(`[${type}] ${message}`);
-    if (typeof showToastPro === 'function') {
-        showToastPro(message, type);
-    }
+    const colors = { success: '#00ff88', error: '#ff4444', info: '#00d9ff' };
+    const toast = document.createElement('div');
+    toast.textContent = message;
+    Object.assign(toast.style, {
+        position: 'fixed', bottom: '2rem', right: '2rem', zIndex: '9999',
+        background: '#1a1d23', border: `1px solid ${colors[type] || colors.info}`,
+        color: colors[type] || colors.info, padding: '0.75rem 1.25rem',
+        borderRadius: '6px', fontSize: '0.8rem', fontWeight: '700',
+        letterSpacing: '0.5px', boxShadow: '0 4px 20px rgba(0,0,0,0.5)',
+        transition: 'opacity 0.4s ease'
+    });
+    document.body.appendChild(toast);
+    setTimeout(() => { toast.style.opacity = '0'; }, 2000);
+    setTimeout(() => toast.remove(), 2400);
 }
 </script>
 

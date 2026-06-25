@@ -15,7 +15,7 @@ class Config:
         (0x2e3c, 0x0049, 'FNB48P/S'),   # FNB48P, FNB48S - Premium testers
         (0x2e3c, 0x5558, 'FNB58'),       # FNB58 - Advanced tester with Bluetooth
         (0x0483, 0x003a, 'FNB48'),       # FNB48 - Original tester
-        (0x0483, 0x003b, 'C1'),          # C1 - Compact Type-C trigger
+        (0x0483, 0x003b, 'C1/FNAC28'),   # C1 and FNAC28 share VID/PID; distinguished by product string
     ]
 
     # Bluetooth Configuration

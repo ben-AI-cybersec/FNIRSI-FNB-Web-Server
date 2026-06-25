@@ -1,10 +1,11 @@
 """
-USB HID Reader for FNIRSI FNB58
-Based on reverse-engineered protocol from baryluk/fnirsi-usb-power-data-logger
+USB HID Reader for FNIRSI power meters.
+Uses hidapi (hid) instead of PyUSB so no libusb/Zadig driver is needed on Windows.
+Protocol reverse-engineered from baryluk/fnirsi-usb-power-data-logger and
+hello-world-dot-c/fnirsi-usb-power-meter.
 """
 
-import usb.core
-import usb.util
+import hid
 import time
 import threading
 from collections import deque
@@ -19,313 +20,114 @@ class USBReader:
         (0x2e3c, 0x0049),  # FNIRSI FNB48P / FNB48S
         (0x2e3c, 0x5558),  # FNIRSI FNB58
         (0x0483, 0x003a),  # FNIRSI FNB48 (older)
-        (0x0483, 0x003b),  # FNIRSI C1
-        (0x0716, 0x5030),  # WITRN U2p
-        (0x0716, 0x5031),  # WITRN variant
+        (0x0483, 0x003b),  # FNIRSI C1 and FNAC28 (same VID/PID, distinguished by product string)
     ]
+
+    # HID report ID prepended to every outgoing write
+    REPORT_ID = 0x00
 
     def __init__(self, vendor_id=None, product_ids=None):
         self.vendor_id = vendor_id
         self.product_ids = product_ids
-        self.device = None
-        self.ep_in = None
-        self.ep_out = None
+        self._dev = None               # hid.device instance
+        self._device_info_raw = None   # dict from hid.enumerate
         self.is_connected = False
         self.is_reading = False
-        self.is_fnb58 = False
+        self.is_fnb58_or_fnb48s = False
+        self.device_name = None        # Resolved during connect()
         self.read_thread = None
         self.data_callback = None
         self.data_buffer = deque(maxlen=1000)
-        
-    def connect(self):
-        """Connect to USB device"""
-        # Find device - try specific IDs first if provided, otherwise scan all supported
-        if self.vendor_id and self.product_ids:
-            for product_id in self.product_ids:
-                self.device = usb.core.find(idVendor=self.vendor_id, idProduct=product_id)
-                if self.device is not None:
-                    break
-        else:
-            # Scan all supported devices
-            for vendor_id, product_id in self.SUPPORTED_DEVICES:
-                self.device = usb.core.find(idVendor=vendor_id, idProduct=product_id)
-                if self.device is not None:
-                    print(f"Found device: VID=0x{vendor_id:04x} PID=0x{product_id:04x}")
-                    break
 
-        if self.device is None:
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def connect(self):
+        """Find and open the first supported FNIRSI HID device."""
+        info = self._find_device()
+        if info is None:
             raise ConnectionError("FNIRSI device not found. Make sure it's connected via USB.")
 
-        # Reset the device first (critical for proper initialization)
-        try:
-            self.device.reset()
-            print("Device reset successful")
-        except usb.core.USBError as e:
-            print(f"Warning: Device reset failed: {e}")
+        dev = hid.device()
+        dev.open_path(info['path'])
 
-        # Detach kernel driver from ALL interfaces (critical for HID devices)
-        for cfg in self.device:
-            for intf in cfg:
-                if self.device.is_kernel_driver_active(intf.bInterfaceNumber):
-                    try:
-                        self.device.detach_kernel_driver(intf.bInterfaceNumber)
-                        print(f"Detached kernel driver from interface {intf.bInterfaceNumber}")
-                    except usb.core.USBError as e:
-                        print(f"Warning: Could not detach kernel driver from interface {intf.bInterfaceNumber}: {e}")
+        self._dev = dev
+        self._device_info_raw = info
 
-        # Set configuration
-        try:
-            self.device.set_configuration()
-        except usb.core.USBError:
-            pass
+        vid = info['vendor_id']
+        pid = info['product_id']
+        self.is_fnb58_or_fnb48s = (vid == 0x2e3c)
+        self.device_name = self._resolve_device_name(vid, pid, info)
+        print(f"Found device: VID=0x{vid:04x} PID=0x{pid:04x} → {self.device_name}")
 
-        # Get endpoints
-        cfg = self.device.get_active_configuration()
-        intf = cfg[(0, 0)]
-        
-        self.ep_out = usb.util.find_descriptor(
-            intf,
-            custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_OUT
-        )
-        
-        self.ep_in = usb.util.find_descriptor(
-            intf,
-            custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_IN
-        )
-        
-        if self.ep_in is None or self.ep_out is None:
-            raise ConnectionError("Could not find USB endpoints")
-        
-        # Detect device type for appropriate refresh rate
-        product_id = self.device.idProduct
-        vendor_id = self.device.idVendor
-        # FNB58 and FNB48S (vendor 0x2e3c) need different protocol
-        self.is_fnb58_or_fnb48s = (vendor_id == 0x2e3c)
-        print(f"Device type: {'FNB58/FNB48S' if self.is_fnb58_or_fnb48s else 'FNB48/C1'}")
-
-        # Send initialization handshake (required to start data streaming)
         self._send_init_handshake()
-
         self.is_connected = True
         return True
 
-    def _send_init_handshake(self):
-        """Send initialization commands to start data streaming"""
-        try:
-            # Initial setup commands
-            self.ep_out.write(b"\xaa\x81" + b"\x00" * 61 + b"\x8e")
-            self.ep_out.write(b"\xaa\x82" + b"\x00" * 61 + b"\x96")
-
-            # Request data command differs by device type
-            if self.is_fnb58_or_fnb48s:
-                self.ep_out.write(b"\xaa\x82" + b"\x00" * 61 + b"\x96")
-            else:
-                self.ep_out.write(b"\xaa\x83" + b"\x00" * 61 + b"\x9e")
-            print("Initialization handshake sent")
-        except Exception as e:
-            print(f"Warning: Handshake failed: {e}")
-    
     def start_reading(self, callback=None):
-        """Start reading data in background thread"""
+        """Start reading data in a background thread."""
         if not self.is_connected:
             raise ConnectionError("Device not connected")
-        
         self.data_callback = callback
         self.is_reading = True
         self.read_thread = threading.Thread(target=self._read_loop, daemon=True)
         self.read_thread.start()
-    
+
     def stop_reading(self):
-        """Stop reading data"""
+        """Stop the reading thread."""
         self.is_reading = False
         if self.read_thread:
             self.read_thread.join(timeout=2)
-    
-    def _read_loop(self):
-        """Main reading loop - runs in background thread"""
-        # Initial delay
-        time.sleep(0.1)
 
-        # Refresh interval: 1s for FNB58/FNB48S, 3ms for FNB48/C1
-        refresh = 1.0 if self.is_fnb58_or_fnb48s else 0.003
-        continue_time = time.time() + refresh
-
-        while self.is_reading:
-            try:
-                # Read data packet
-                data = self.ep_in.read(size_or_buffer=64, timeout=5000)
-
-                # Decode the packet
-                readings = self._decode_packet(data)
-
-                # Store in buffer
-                for reading in readings:
-                    self.data_buffer.append(reading)
-
-                    # Call callback if provided
-                    if self.data_callback:
-                        self.data_callback(reading)
-
-                # Send keep-alive/request more data
-                if time.time() >= continue_time:
-                    continue_time = time.time() + refresh
-                    # Keep-alive command (same for all devices)
-                    self.ep_out.write(b"\xaa\x83" + b"\x00" * 61 + b"\x9e")
-
-            except usb.core.USBError as e:
-                if self.is_reading:  # Only print if we're still supposed to be reading
-                    print(f"USB Error: {e}")
-                    time.sleep(0.1)
-            except Exception as e:
-                print(f"Error in read loop: {e}")
-                time.sleep(0.1)
-    
-    def _decode_packet(self, data):
-        """Decode data packet into readings"""
-        readings = []
-        timestamp = datetime.now()
-
-        # Check packet type - byte 1 should be 0x04 for data packets
-        if len(data) < 64 or data[1] != 0x04:
-            return readings  # Ignore non-data packets
-
-        # Each packet contains 4 samples, each 15 bytes, starting at offset 2
-        # Layout: [0xaa][type][sample0 15B][sample1 15B][sample2 15B][sample3 15B][unknown][crc]
-        for i in range(4):
-            offset = 2 + (15 * i)
-            if offset + 14 >= len(data):
-                break
-
-            # Voltage (4 bytes, little-endian, /100000)
-            voltage = (
-                data[offset + 3] * 256 * 256 * 256 +
-                data[offset + 2] * 256 * 256 +
-                data[offset + 1] * 256 +
-                data[offset + 0]
-            ) / 100000.0
-
-            # Current (4 bytes, little-endian, /100000)
-            current = (
-                data[offset + 7] * 256 * 256 * 256 +
-                data[offset + 6] * 256 * 256 +
-                data[offset + 5] * 256 +
-                data[offset + 4]
-            ) / 100000.0
-
-            # D+ voltage (2 bytes, little-endian, /1000)
-            dp = (data[offset + 8] + data[offset + 9] * 256) / 1000.0
-
-            # D- voltage (2 bytes, little-endian, /1000)
-            dn = (data[offset + 10] + data[offset + 11] * 256) / 1000.0
-
-            # Temperature (2 bytes, little-endian, /10) - at offset 13-14
-            temp = (data[offset + 13] + data[offset + 14] * 256) / 10.0
-
-            # Calculate power
-            power = voltage * current
-
-            reading = {
-                'timestamp': timestamp.isoformat(),
-                'voltage': round(voltage, 5),
-                'current': round(current, 5),
-                'power': round(power, 5),
-                'dp': round(dp, 3),
-                'dn': round(dn, 3),
-                'temperature': round(temp, 1),
-                'sample': i
-            }
-
-            readings.append(reading)
-
-        return readings
-    
     def disconnect(self):
-        """Disconnect from device"""
+        """Stop reading and close the HID handle."""
         self.stop_reading()
-        
-        if self.device:
+        if self._dev is not None:
             try:
-                usb.util.dispose_resources(self.device)
-            except usb.core.USBError:
-                pass  # Device may already be disconnected
-        
+                self._dev.close()
+            except Exception:
+                pass
+        self._dev = None
         self.is_connected = False
-    
-    def get_device_info(self):
-        """Get device information"""
-        if not self.device:
-            return None
 
+    def get_device_info(self):
+        """Return device metadata dict."""
+        if not self._device_info_raw:
+            return None
+        info = self._device_info_raw
         return {
-            'vendor_id': f"0x{self.device.idVendor:04x}",
-            'product_id': f"0x{self.device.idProduct:04x}",
-            'manufacturer': usb.util.get_string(self.device, self.device.iManufacturer) if self.device.iManufacturer else "Unknown",
-            'product': usb.util.get_string(self.device, self.device.iProduct) if self.device.iProduct else "Unknown",
-            'serial': usb.util.get_string(self.device, self.device.iSerialNumber) if self.device.iSerialNumber else "Unknown"
+            'vendor_id': f"0x{info['vendor_id']:04x}",
+            'product_id': f"0x{info['product_id']:04x}",
+            'manufacturer': info.get('manufacturer_string') or 'Unknown',
+            'product': info.get('product_string') or 'Unknown',
+            'serial': info.get('serial_number') or 'Unknown',
+            'device_name': self.device_name or 'Unknown',
         }
 
     def trigger_voltage(self, protocol, voltage):
-        """
-        Trigger fast charging protocol voltage
-
-        Args:
-            protocol: Protocol type ('pd', 'qc', 'afc', 'fcp', 'scp', 'vooc')
-            voltage: Target voltage (5, 9, 12, 15, 20)
-
-        Returns:
-            bool: True if command sent successfully
-        """
-        if not self.is_connected or not self.ep_out:
+        """Send a fast-charging protocol trigger command."""
+        if not self.is_connected:
             raise ConnectionError("Device not connected")
 
-        # Protocol trigger commands (based on FNIRSI protocol)
         trigger_commands = {
-            'pd': {
-                5: b"\x5a\x01\x05",   # PD 5V
-                9: b"\x5a\x01\x09",   # PD 9V
-                12: b"\x5a\x01\x0c",  # PD 12V
-                15: b"\x5a\x01\x0f",  # PD 15V
-                20: b"\x5a\x01\x14"   # PD 20V
-            },
-            'qc': {
-                5: b"\x5a\x02\x05",   # QC 5V
-                9: b"\x5a\x02\x09",   # QC 9V
-                12: b"\x5a\x02\x0c"   # QC 12V
-            },
-            'afc': {
-                5: b"\x5a\x03\x05",   # AFC 5V
-                9: b"\x5a\x03\x09",   # AFC 9V
-                12: b"\x5a\x03\x0c"   # AFC 12V
-            },
-            'fcp': {
-                5: b"\x5a\x04\x05",   # FCP 5V
-                9: b"\x5a\x04\x09",   # FCP 9V
-                12: b"\x5a\x04\x0c"   # FCP 12V
-            },
-            'scp': {
-                5: b"\x5a\x05\x05",   # SCP 5V
-                9: b"\x5a\x05\x09",   # SCP 9V
-                12: b"\x5a\x05\x0c"   # SCP 12V
-            },
-            'vooc': {
-                5: b"\x5a\x06\x05",   # VOOC 5V
-                10: b"\x5a\x06\x0a"   # VOOC 10V
-            }
+            'pd':   {5: b"\x5a\x01\x05", 9: b"\x5a\x01\x09", 12: b"\x5a\x01\x0c",
+                     15: b"\x5a\x01\x0f", 20: b"\x5a\x01\x14"},
+            'qc':   {5: b"\x5a\x02\x05", 9: b"\x5a\x02\x09", 12: b"\x5a\x02\x0c"},
+            'afc':  {5: b"\x5a\x03\x05", 9: b"\x5a\x03\x09", 12: b"\x5a\x03\x0c"},
+            'fcp':  {5: b"\x5a\x04\x05", 9: b"\x5a\x04\x09", 12: b"\x5a\x04\x0c"},
+            'scp':  {5: b"\x5a\x05\x05", 9: b"\x5a\x05\x09", 12: b"\x5a\x05\x0c"},
+            'vooc': {5: b"\x5a\x06\x05", 10: b"\x5a\x06\x0a"},
         }
-
         if protocol not in trigger_commands:
             raise ValueError(f"Unknown protocol: {protocol}")
-
         if voltage not in trigger_commands[protocol]:
             raise ValueError(f"Unsupported voltage {voltage}V for {protocol.upper()}")
 
         command = trigger_commands[protocol][voltage]
-
-        # Pad command to 64 bytes
-        padded_command = command + b"\x00" * (64 - len(command))
-
+        padded = command + b"\x00" * (64 - len(command))
         try:
-            self.ep_out.write(padded_command)
+            self._write(padded)
             print(f"✓ Triggered {protocol.upper()} {voltage}V")
             return True
         except Exception as e:
@@ -333,32 +135,136 @@ class USBReader:
             raise
 
     def adjust_qc3_voltage(self, target_voltage):
-        """
-        Adjust QC 3.0 voltage in fine steps (3.6V - 12.0V)
-
-        Args:
-            target_voltage: Target voltage (float, 3.6 - 12.0)
-
-        Returns:
-            bool: True if command sent successfully
-        """
-        if not self.is_connected or not self.ep_out:
+        """Adjust QC 3.0 voltage in fine steps (3.6 V – 12.0 V)."""
+        if not self.is_connected:
             raise ConnectionError("Device not connected")
+        if not (3.6 <= target_voltage <= 12.0):
+            raise ValueError("QC 3.0 voltage must be between 3.6 V and 12.0 V")
 
-        if target_voltage < 3.6 or target_voltage > 12.0:
-            raise ValueError("QC 3.0 voltage must be between 3.6V and 12.0V")
-
-        # Convert voltage to millivolts
         millivolts = int(target_voltage * 1000)
-
-        # QC 3.0 adjustment command
         command = b"\x5a\x02" + millivolts.to_bytes(2, byteorder='little')
-        padded_command = command + b"\x00" * (64 - len(command))
-
+        padded = command + b"\x00" * (64 - len(command))
         try:
-            self.ep_out.write(padded_command)
-            print(f"✓ QC 3.0 adjusted to {target_voltage:.2f}V")
+            self._write(padded)
+            print(f"✓ QC 3.0 adjusted to {target_voltage:.2f} V")
             return True
         except Exception as e:
             print(f"❌ QC 3.0 adjustment failed: {e}")
             raise
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _write(self, payload64: bytes):
+        """Write a 64-byte payload to the HID device (prepends report ID)."""
+        self._dev.write([self.REPORT_ID] + list(payload64))
+
+    def _find_device(self):
+        """Return the first matching hid.enumerate dict, or None."""
+        candidates = [(self.vendor_id, self.product_ids)] if self.vendor_id else None
+        if candidates:
+            for pid in self.product_ids:
+                for d in hid.enumerate(self.vendor_id, pid):
+                    return d
+            return None
+
+        for vid, pid in self.SUPPORTED_DEVICES:
+            for d in hid.enumerate(vid, pid):
+                return d
+        return None
+
+    def _resolve_device_name(self, vendor_id, product_id, info):
+        """Return a human-readable device name, distinguishing C1 from FNAC28."""
+        name_map = {
+            (0x2e3c, 0x0049): 'FNB48P/S',
+            (0x2e3c, 0x5558): 'FNB58',
+            (0x0483, 0x003a): 'FNB48',
+        }
+        if (vendor_id, product_id) in name_map:
+            return name_map[(vendor_id, product_id)]
+        if vendor_id == 0x0483 and product_id == 0x003b:
+            product_str = (info.get('product_string') or '').lower()
+            return 'C1' if 'c1' in product_str else 'FNAC28'
+        return f'Unknown (VID=0x{vendor_id:04x} PID=0x{product_id:04x})'
+
+    def _send_init_handshake(self):
+        """Send the initialization sequence required to start data streaming."""
+        try:
+            self._write(b"\xaa\x81" + b"\x00" * 61 + b"\x8e")
+            self._write(b"\xaa\x82" + b"\x00" * 61 + b"\x96")
+            if self.is_fnb58_or_fnb48s:
+                self._write(b"\xaa\x82" + b"\x00" * 61 + b"\x96")
+            else:
+                self._write(b"\xaa\x83" + b"\x00" * 61 + b"\x9e")
+            print("Initialization handshake sent")
+        except Exception as e:
+            print(f"Warning: Handshake failed: {e}")
+
+    def _read_loop(self):
+        """Background thread: poll device and forward decoded readings.
+
+        FNIRSI devices don't auto-stream; they must be explicitly polled.
+        FNB48/C1/FNAC28: send AA82+AA83 before each read (3 ms cycle).
+        FNB58/FNB48S: send AA82 before each read (1 s cycle).
+        """
+        time.sleep(0.1)
+
+        poll_aa82 = b"\xaa\x82" + b"\x00" * 61 + b"\x96"
+        poll_aa83 = b"\xaa\x83" + b"\x00" * 61 + b"\x9e"
+        # FNB58/FNB48S: 200 ms read timeout per cycle; others: 50 ms
+        read_timeout = 200 if self.is_fnb58_or_fnb48s else 50
+        cycle_sleep  = 1.0 if self.is_fnb58_or_fnb48s else 0.003
+
+        while self.is_reading:
+            try:
+                self._write(poll_aa82)
+                if not self.is_fnb58_or_fnb48s:
+                    self._write(poll_aa83)
+
+                raw = self._dev.read(64, timeout_ms=read_timeout)
+                if raw:
+                    readings = self._decode_packet(bytes(raw))
+                    for reading in readings:
+                        self.data_buffer.append(reading)
+                        if self.data_callback:
+                            self.data_callback(reading)
+
+                time.sleep(cycle_sleep)
+
+            except Exception as e:
+                if self.is_reading:
+                    print(f"USB read error: {e}")
+                    time.sleep(0.1)
+
+    def _decode_packet(self, data: bytes):
+        """Decode an AA04 data packet into up to 4 reading dicts."""
+        readings = []
+        if len(data) < 64 or data[1] != 0x04:
+            return readings
+
+        timestamp = datetime.now().isoformat()
+        for i in range(4):
+            off = 2 + 15 * i
+            if off + 14 >= len(data):
+                break
+
+            voltage  = int.from_bytes(data[off:off+4],    'little') / 100000.0
+            current  = int.from_bytes(data[off+4:off+8],  'little') / 100000.0
+            dp       = int.from_bytes(data[off+8:off+10], 'little') / 1000.0
+            dn       = int.from_bytes(data[off+10:off+12],'little') / 1000.0
+            temp     = int.from_bytes(data[off+13:off+15],'little') / 10.0
+            power    = voltage * current
+
+            readings.append({
+                'timestamp':   timestamp,
+                'voltage':     round(voltage, 5),
+                'current':     round(current, 5),
+                'power':       round(power,   5),
+                'dp':          round(dp,      3),
+                'dn':          round(dn,      3),
+                'temperature': round(temp,    1),
+                'sample':      i,
+            })
+
+        return readings

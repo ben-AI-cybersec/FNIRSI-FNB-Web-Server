@@ -542,4 +542,7 @@ if __name__ == '__main__':
     print("=" * 60)
 
     # Run with SocketIO (allow_unsafe_werkzeug needed for Flask-SocketIO 5.3+)
-    socketio.run(app, host='0.0.0.0', port=5002, debug=True, allow_unsafe_werkzeug=True)
+    # use_reloader=False: Werkzeug's reloader intercepts WebSocket upgrade requests and
+    # raises "write() before start_response" — disabling it fixes the SocketIO 500 errors.
+    socketio.run(app, host='0.0.0.0', port=5002, debug=True,
+                 allow_unsafe_werkzeug=True, use_reloader=False)

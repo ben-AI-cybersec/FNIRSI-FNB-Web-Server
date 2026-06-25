@@ -2,9 +2,9 @@
 
 ## Project Overview
 
-A real-time web application for monitoring FNIRSI USB Power Meters via USB and Bluetooth. Supports FNB58, FNB48, FNB48S, FNB48P, and C1 devices. Built with Flask, WebSocket, and modern JavaScript.
+A real-time web application for monitoring FNIRSI USB Power Meters via USB and Bluetooth. Supports FNB58, FNB48, FNB48S, FNB48P, C1, and FNAC28 devices. Built with Flask, WebSocket, and modern JavaScript.
 
-**Supported Devices**: FNB58, FNB48, FNB48S, FNB48P, C1
+**Supported Devices**: FNB58, FNB48, FNB48S, FNB48P, C1, FNAC28
 
 **Key Technologies**: Flask 3.0, Flask-SocketIO, PyUSB, Bleak, Chart.js, TailwindCSS
 
@@ -358,7 +358,7 @@ SUPPORTED_DEVICES = [
     (0x2e3c, 0x0049, 'FNB48P/S'),   # FNB48P, FNB48S
     (0x2e3c, 0x5558, 'FNB58'),       # FNB58
     (0x0483, 0x003a, 'FNB48'),       # FNB48
-    (0x0483, 0x003b, 'C1'),          # C1
+    (0x0483, 0x003b, 'C1/FNAC28'),   # C1 and FNAC28 (same VID/PID; distinguished by product string)
 ]
 SAMPLE_RATE_HZ = 100  # USB sampling rate
 BT_SAMPLE_RATE_HZ = 10  # Bluetooth sampling rate

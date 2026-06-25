@@ -63,7 +63,8 @@ function initChartsPro() {
                     borderWidth: 2,
                     pointRadius: 0,
                     tension: 0.1,
-                    fill: true
+                    fill: true,
+                    yAxisID: 'yV'
                 },
                 {
                     label: 'Current (A)',
@@ -73,7 +74,8 @@ function initChartsPro() {
                     borderWidth: 2,
                     pointRadius: 0,
                     tension: 0.1,
-                    fill: true
+                    fill: true,
+                    yAxisID: 'yI'
                 },
                 {
                     label: 'Power (W)',
@@ -83,7 +85,8 @@ function initChartsPro() {
                     borderWidth: 2,
                     pointRadius: 0,
                     tension: 0.1,
-                    fill: true
+                    fill: true,
+                    yAxisID: 'yI'
                 }
             ]
         },
@@ -106,23 +109,56 @@ function initChartsPro() {
                     },
                     ticks: {
                         color: '#5f6368',
-                        font: { size: 10 }
+                        font: { size: 10 },
+                        stepSize: (timebase / 1000) * sampleRate,
+                        callback: function(value) {
+                            const totalSeconds = Math.floor(value / sampleRate);
+                            const m = Math.floor(totalSeconds / 60);
+                            const s = totalSeconds % 60;
+                            const timeStr = `${m}:${String(s).padStart(2, '0')}`;
+                            return [timeStr, value.toLocaleString()];
+                        }
                     },
                     grid: {
                         color: '#2d3139',
                         drawBorder: false
                     }
                 },
-                y: {
+                yV: {
+                    position: 'left',
                     beginAtZero: true,
-                    grace: '15%',  // Add 15% padding above/below to prevent cutoff
+                    grace: '10%',
+                    title: {
+                        display: true,
+                        text: 'Voltage (V)',
+                        color: '#00d9ff',
+                        font: { size: 11, weight: 'bold' }
+                    },
                     ticks: {
-                        color: '#9aa0a6',
+                        color: '#00d9ff',
                         font: { size: 11, weight: 'bold' }
                     },
                     grid: {
                         color: '#2d3139',
                         drawBorder: false
+                    }
+                },
+                yI: {
+                    position: 'right',
+                    beginAtZero: true,
+                    grace: '10%',
+                    title: {
+                        display: true,
+                        text: 'Current (A) / Power (W)',
+                        color: '#00ff88',
+                        font: { size: 11, weight: 'bold' }
+                    },
+                    ticks: {
+                        color: '#00ff88',
+                        font: { size: 11, weight: 'bold' }
+                    },
+                    grid: {
+                        drawOnChartArea: false  // Only left axis draws grid lines
                     }
                 }
             },
@@ -478,7 +514,10 @@ function updateTimebase() {
     const select = document.getElementById('timebase-select');
     if (select) {
         timebase = parseInt(select.value);
-        console.log('Timebase updated to:', timebase, 'ms/div');
+        if (charts.waveform) {
+            charts.waveform.options.scales.x.ticks.stepSize = (timebase / 1000) * sampleRate;
+            charts.waveform.update('none');
+        }
     }
 }
 
@@ -547,6 +586,7 @@ function toggleFreeze() {
 
 function clearCharts() {
     dataBuffer = [];
+    waveformIndex = 0;
     if (charts.waveform) {
         charts.waveform.data.datasets.forEach(dataset => {
             dataset.data = [];
